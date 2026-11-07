@@ -7,6 +7,7 @@ dependencies = []
 
 [project.optional-dependencies]
 images = ["Pillow>=9"]
+dev = ["pytest>=7", "Pillow>=9"]
 
 [project.scripts]
 loratrain = "loratrain.cli:main"
@@ -17,3 +18,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = ["loratrain"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]

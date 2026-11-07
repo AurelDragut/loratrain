@@ -15,11 +15,27 @@ Three presets ship, each encoding one specific failure mode:
 
 ## Install
 
+Run this from the repository root, in the environment you will run the tool from:
+
 ```
 pip install -e .
 ```
 
-Or without installing: `python -m loratrain ...` from the repository root.
+That installs a `loratrain` command into that environment — `~/kohya_ss/venv/bin/loratrain`
+— so either activate the venv or call it by path. `pip install -e ".[dev]"` does the
+same and adds pytest and Pillow for the tests.
+
+Without installing, run it as a module, from the repository root:
+
+```
+python -m loratrain doctor
+```
+
+`loratrain: command not found` means the command is not on your `PATH`: either the
+package was never installed into the environment you are calling from, or it went to
+`~/.local/bin` (a `pip install --user`) which Kubuntu does not always add to `PATH`.
+`export PATH="$HOME/.local/bin:$PATH"` fixes the second case; `hash -r` clears the
+shell's cached command list after either.
 
 No runtime dependencies. Pillow is used for reading image sizes and for
 near-duplicate detection when it is present, and image headers are parsed directly
@@ -312,10 +328,33 @@ you judge.
 
 ## Tests
 
+The suite needs pytest, which is not a runtime dependency:
+
 ```
+pip install -e ".[dev]"     # loratrain + pytest + Pillow
 python -m pytest
 ```
 
+Run it in the same environment the tool runs in — the kohya venv is the practical
+choice on Kubuntu, since the system Python refuses installs
+(`externally-managed-environment`, PEP 668).
+
+If `python -m pytest` says `No module named pytest`, that interpreter does not have
+it: `python -m pytest` resolves pytest from *that* interpreter, not from any
+`pytest` script on `PATH`. Install it there, or point at the venv explicitly:
+
+```
+~/kohya_ss/venv/bin/python -m pip install pytest
+~/kohya_ss/venv/bin/python -m pytest
+```
+
+pytest is not needed to know the package imports and the CLI is wired:
+
+```
+python -m compileall -q loratrain
+python -m loratrain presets
+```
+
 The tests cover bucket maths, the image header parser, the generated TOML,
-duplicate grouping, attribute voting, the VLM reply parser, caption assembly and
-the progress-bar parser.
+duplicate grouping, attribute voting, the VLM reply parser, caption assembly, the
+progress-bar parser, the sample scanning and the kohya discovery.
