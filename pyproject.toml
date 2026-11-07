@@ -1,0 +1,19 @@
+[project]
+name = "loratrain"
+version = "0.1.0"
+description = "Dataset audit, kohya sd-scripts config generation and training launcher for LoRAs"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+images = ["Pillow>=9"]
+
+[project.scripts]
+loratrain = "loratrain.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["loratrain"]
