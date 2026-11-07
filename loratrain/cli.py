@@ -261,7 +261,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
     print(f"loratrain {__version__}")
-    print(f"python      {sys.version.split()[0]}  ({sys.executable})")
+    print(f"python      {sys.version.split()[0]}  ({args.python})")
 
     sd = SdScripts.discover(args.sd_scripts)
     if sd is None:
@@ -284,8 +284,10 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             print(f"  t5 token length flag: --{token_name}" if token_name else "  t5 token length flag: not found")
             print(f"  flux_shift timestep sampling: {'yes' if probe.mentions('flux_shift') else 'no'}")
 
-    accelerate = which_accelerate()
-    print(f"accelerate  {accelerate or 'NOT FOUND (pip install accelerate)'}")
+    accelerate = which_accelerate(args.python)
+    print(f"accelerate  {accelerate or 'NOT FOUND'}")
+    if accelerate is None:
+        print(f"            try {args.python} -m pip install accelerate")
 
     ok = sd is not None and bool(accelerate)
 
@@ -643,12 +645,15 @@ def _prepare(args: argparse.Namespace, *, need_script: bool) -> Plan:
         trigger=args.trigger,
     )
 
-    accelerate = which_accelerate()
+    accelerate = which_accelerate(args.python)
     command = None
     if script is not None and accelerate is not None:
         command = build_command(accelerate, script, config)
     elif need_script:
-        raise SystemExit("accelerate not found: pip install accelerate")
+        raise SystemExit(
+            f"accelerate not found next to {args.python} or on PATH; "
+            f"try {args.python} -m pip install accelerate"
+        )
 
     return Plan(
         preset=preset,

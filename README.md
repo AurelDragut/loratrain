@@ -66,6 +66,51 @@ loratrain doctor --comfy ~/ComfyUI
 lists every model it found, marks each usable or not, and gives the reason for the
 ones that are not.
 
+## Where it finds kohya, and where it looks for accelerate
+
+`loratrain` needs three things that can live in different places: the
+`sd-scripts` folder, a Python that has torch and accelerate, and the `accelerate`
+executable. The scripts are found in this order:
+
+1. `--sd-scripts <path>` — either the `sd-scripts` folder or the `kohya_ss` root
+   containing it
+2. the `LORATRAIN_SD_SCRIPTS` environment variable
+3. the current directory, then `./sd-scripts`
+4. `~/sd-scripts`, `~/kohya_ss`, `~/kohya-ss`
+5. `/opt/kohya_ss`, `/opt/kohya-ss`, `/opt/sd-scripts`, `/usr/local/sd-scripts`
+
+A folder only counts if it actually holds `sdxl_train_network.py`,
+`flux_train_network.py` or `train_network.py`, so it will not mistake a random
+directory for an install. `loratrain doctor` prints what it found.
+
+`accelerate` is looked for next to the `--python` interpreter first, and only then
+on `PATH`. That is the venv case: `accelerate`, torch and sd-scripts' requirements
+live in one environment, so `--python ~/kohya_ss/venv/bin/python` is enough even
+when that venv is not activated and nothing of it is on `PATH`.
+
+### Kubuntu
+
+Ubuntu's Python is marked externally managed (PEP 668), so nothing installs into it
+and the venv is not optional:
+
+```
+sudo apt install python3-venv python3-pip git
+python3 -m venv ~/kohya_ss/venv
+source ~/kohya_ss/venv/bin/activate
+pip install -r ~/kohya_ss/sd-scripts/requirements.txt   # brings torch + accelerate
+```
+
+Then either activate that venv before running, or point at it explicitly:
+
+```
+loratrain doctor --sd-scripts ~/kohya_ss --python ~/kohya_ss/venv/bin/python
+loratrain run ~/data/sdxl --preset sdxl --comfy ~/ComfyUI \
+  --sd-scripts ~/kohya_ss --python ~/kohya_ss/venv/bin/python --trigger mytok
+```
+
+`--python` decides both which interpreter probes `sd-scripts --help` and which
+environment `accelerate` is taken from, so the two cannot disagree.
+
 ## Commands
 
 ```
@@ -253,8 +298,9 @@ which includes loading the model.
   `network_module = "networks.lora"` only resolves from there.
 
 **`doctor`** reports what it found: the sd-scripts directory, which model scripts
-exist, which learning-rate/parameter names that version supports, and whether
-`accelerate` is on PATH.
+exist, which flag names that version supports, whether `accelerate` is available
+(and from where), and — with `--vlm-url` or `--comfy` — the vision endpoint and the
+ComfyUI models.
 
 ## What it does not do
 
