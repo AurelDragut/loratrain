@@ -26,6 +26,46 @@ near-duplicate detection when it is present, and image headers are parsed direct
 when it is not — install it with `pip install -e ".[images]"` if you want the
 perceptual hash.
 
+## Using models you already have in ComfyUI
+
+`--comfy` points at the ComfyUI install and fills any model path you did not pass
+from `<root>/models`, choosing the file that can actually train:
+
+```
+loratrain run ~/data/sdxl --preset sdxl --comfy ~/ComfyUI --trigger mytok
+loratrain run ~/data/krea --preset krea --comfy ~/ComfyUI --trigger mytok
+```
+
+Explicit `--base` / `--clip-l` / `--t5xxl` / `--ae` always win over what it finds.
+
+What works:
+
+- `models/checkpoints/sd_xl_base_1.0.safetensors` — yes, that is the layout
+  `sdxl_train_network.py` loads.
+- `models/diffusion_models/flux1-dev.safetensors` — yes, when it is the transformer
+  alone in bf16 (~23.8 GB).
+- `models/text_encoders/clip_l.safetensors` and `t5xxl_fp16.safetensors` — yes,
+  they are exactly the `--clip_l` / `--t5xxl` files.
+- `models/vae/ae.safetensors`, `sdxl_vae.safetensors` — yes.
+- `models/loras/*.safetensors` — only as an initialisation
+  (`--set network_weights=...`), never as a training base.
+
+What does not, and why:
+
+- All-in-one Flux checkpoints, with the transformer, text encoders and VAE in one
+  file. sd-scripts loads a transformer, so the file has to be split. `--comfy`
+  spots this from the tensor names and says so instead of failing at launch.
+- Pre-quantised fp8 Flux weights. `--fp8_base` quantises a bf16 file on the fly;
+  handing it already-scaled fp8 weights throws away what it is meant to compute.
+- GGUF models — not trainable at all.
+
+```
+loratrain doctor --comfy ~/ComfyUI
+```
+
+lists every model it found, marks each usable or not, and gives the reason for the
+ones that are not.
+
 ## Commands
 
 ```
@@ -36,6 +76,7 @@ loratrain caption <dataset> --trigger mytok --vlm-url http://localhost:11434 --v
 loratrain plan    <dataset> --preset sdxl --base ~/models/sd_xl_base_1.0.safetensors --trigger mytok
 loratrain run     <dataset> --preset sdxl --base ~/models/sd_xl_base_1.0.safetensors --trigger mytok
 loratrain watch   <out> --follow
+loratrain serve   <out>
 ```
 
 Flux and Krea need four model files:
@@ -90,6 +131,37 @@ The warnings are the point of the exercise:
 sd-scripts paints its bar with carriage returns and no newlines while it runs, so
 the runner reads both and the log is stored raw; `watch` splits on both as well.
 That is why reading one paint behind is normal for a fraction of a second.
+
+## The web view, with the sample images
+
+The terminal cannot show you the samples, so there is a page for that:
+
+```
+loratrain run ~/data/sdxl --preset sdxl --comfy ~/ComfyUI --serve --trigger mytok
+```
+
+prints `live view   http://127.0.0.1:8000/` before training starts, and the page
+fills in as it goes. For a run already going — or one started in kohya's GUI —
+point it at the output folder:
+
+```
+loratrain serve ~/out/sdxl_mylora          # opens a browser
+loratrain serve ~/out/sdxl_mylora --no-browser --port 8010
+```
+
+It shows the step and percentage as a bar, the loss curve over the last 400
+readings, speed, ETA, the current lr, any warnings from the progress monitor, and a
+grid of the sample images sd-scripts writes to `<out>/sample/` — newest first,
+labelled with the step parsed out of the filename, click to open full size.
+
+Implementation notes worth knowing: it is one stdlib `http.server` on
+`127.0.0.1`, no build step and no CDN, and the page polls `/api/state` every two
+seconds. The log is read incrementally from the last offset, so polling a 200 MB
+log costs nothing; a truncated log (a new run over the same folder) resets it.
+Sample serving rejects any path that is not a plain filename.
+
+`--serve` only stays up while the training process lives. If you want the page to
+outlive it, run `loratrain serve` in another terminal.
 
 ## What each command actually does
 

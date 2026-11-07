@@ -7,7 +7,7 @@ import codecs
 import os
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import __version__
@@ -17,12 +17,14 @@ from .captioning import (
     render_report as render_caption_report,
     run as run_caption,
 )
+from .comfy import find_models_dir, scan as scan_comfy, select as select_comfy
 from .dataset import Finding, list_images, report as build_report, scan
 from .dedupe import find_duplicates
 from .env import SdScripts, which_accelerate
 from .presets import ALIASES, PRESETS, Preset, presets_text
 from .progress import Monitor, parse_line
 from .runner import SPLIT_RE, build_command, run_command
+from .serve import build_server, run_server, start_in_thread
 from .tomlgen import build_parts, write_files
 from .vlm import VlmConfig, list_models, resolve_flavor
 
@@ -44,6 +46,7 @@ class Plan:
     report_text: str
     findings: list[Finding]
     dropped: list[str]
+    comfy: dict[str, str] = field(default_factory=dict)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -82,6 +85,7 @@ def _parser() -> argparse.ArgumentParser:
     _add_env_args(doctor)
     doctor.add_argument("--vlm-url", default=None, help="also check a vision endpoint")
     doctor.add_argument("--vlm-model", default=None, help="model the endpoint should be serving")
+    doctor.add_argument("--comfy", default=None, help="also report a ComfyUI folder's usable models")
     doctor.set_defaults(handler=_cmd_doctor)
 
     plan = sub.add_parser("plan", help="audit a dataset, write the config, print the command")
@@ -99,6 +103,13 @@ def _parser() -> argparse.ArgumentParser:
         default=60.0,
         help="seconds between progress readings while training (0 disables)",
     )
+    run.add_argument(
+        "--serve",
+        action="store_true",
+        help="start the web view for this run and print its URL",
+    )
+    run.add_argument("--port", type=int, default=8000, help="port for --serve")
+    run.add_argument("--host", default="127.0.0.1", help="host for --serve")
     run.set_defaults(handler=_cmd_run)
 
     watch = sub.add_parser("watch", help="read a training log: speed, loss trend, eta")
@@ -107,6 +118,13 @@ def _parser() -> argparse.ArgumentParser:
     watch.add_argument("--from-start", action="store_true", help="with --follow, read existing lines too")
     watch.add_argument("--every", type=float, default=30.0, help="seconds between readings when following")
     watch.set_defaults(handler=_cmd_watch)
+
+    serve = sub.add_parser("serve", help="web view of a run: progress and sample images")
+    serve.add_argument("out", help="the training output folder")
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=8000)
+    serve.add_argument("--no-browser", action="store_true")
+    serve.set_defaults(handler=_cmd_serve)
 
     caption = sub.add_parser("caption", help="check duplicates and size, then caption with a vision model")
     caption.add_argument("dataset")
@@ -172,6 +190,11 @@ def _add_training_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--clip-l", dest="clip_l", default=None, help="Flux clip_l weights")
     parser.add_argument("--t5xxl", default=None, help="Flux t5xxl weights")
     parser.add_argument("--ae", default=None, help="Flux autoencoder weights")
+    parser.add_argument(
+        "--comfy",
+        default=None,
+        help="ComfyUI root: fill any model path you did not pass from its models/ folder",
+    )
     parser.add_argument("--repeats", type=int, default=None, help="num_repeats for the subset")
     _add_scan_args(parser)
     parser.add_argument("--resolution", type=int, default=None, help="training resolution")
@@ -284,6 +307,21 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
                 print(f"            WARN {args.vlm_model} is not among them")
                 ok = False
 
+    if args.comfy:
+        models_dir = find_models_dir(args.comfy)
+        found = scan_comfy(args.comfy)
+        print(f"comfy       {models_dir}")
+        if not found:
+            print("            no models found - is this the ComfyUI root?")
+            ok = False
+        else:
+            usable = [model for model in found if model.usable]
+            print(f"            {len(usable)} of {len(found)} model(s) usable for training")
+            for model in found[:12]:
+                print(f"  {'ok' if model.usable else 'NO'}  {model.role:<12} {model.path.name}")
+                if model.note:
+                    print(f"      {model.note}")
+
     return 0 if ok else 1
 
 
@@ -341,6 +379,17 @@ def _cmd_caption(args: argparse.Namespace) -> int:
     return 1 if report.failed else 0
 
 
+def _cmd_serve(args: argparse.Namespace) -> int:
+    out = Path(args.out).expanduser()
+    if not out.is_dir():
+        raise SystemExit(f"not a folder: {out}")
+    try:
+        run_server(out, host=args.host, port=args.port, open_browser=not args.no_browser)
+    except OSError as exc:
+        raise SystemExit(f"cannot listen on {args.host}:{args.port}: {exc}")
+    return 0
+
+
 def _cmd_plan(args: argparse.Namespace) -> int:
     plan = _prepare(args, need_script=False)
     _print_plan(plan)
@@ -366,6 +415,17 @@ def _cmd_run(args: argparse.Namespace) -> int:
         return 1
 
     log_path = Path(args.log).expanduser() if args.log else plan.out_dir / "train.log"
+
+    view_url = None
+    if args.serve:
+        try:
+            server, view_url = build_server(plan.out_dir, host=args.host, port=args.port)
+        except OSError as exc:
+            print(f"could not start the web view on {args.host}:{args.port}: {exc}")
+            view_url = None
+        else:
+            start_in_thread(server)
+            print(f"live view   {view_url}")
 
     monitor = Monitor()
     last_report = [0.0]
@@ -399,6 +459,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
         print(monitor.report())
 
     print(f"log: {log_path}")
+    if view_url:
+        print(f"the web view stopped with the run; browse it again with `loratrain serve {plan.out_dir}`")
     return code
 
 
@@ -490,6 +552,14 @@ def _prepare(args: argparse.Namespace, *, need_script: bool) -> Plan:
         "t5xxl": args.t5xxl,
         "ae": args.ae,
     }
+
+    comfy_choice: dict[str, str] = {}
+    if args.comfy:
+        for key, path in select_comfy(scan_comfy(args.comfy), preset.name).items():
+            if not models.get(key):
+                models[key] = str(path)
+                comfy_choice[key] = str(path)
+
     missing = [key for key in preset.requires if not models[key]]
     if missing:
         flags = ", ".join("--" + key.replace("_", "-") for key in missing)
@@ -596,6 +666,7 @@ def _prepare(args: argparse.Namespace, *, need_script: bool) -> Plan:
         report_text=report_text,
         findings=findings,
         dropped=dropped,
+        comfy=comfy_choice,
     )
 
 
@@ -620,6 +691,8 @@ def _print_plan(plan: Plan) -> None:
         print(f"note       {plan.preset.notes}")
     if plan.dropped:
         print(f"dropped    {', '.join(plan.dropped)} (not accepted by the installed sd-scripts)")
+    if plan.comfy:
+        print("comfy      " + ", ".join(f"{key}={Path(value).name}" for key, value in plan.comfy.items()))
 
     if plan.findings:
         print()
