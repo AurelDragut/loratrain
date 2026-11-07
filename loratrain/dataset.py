@@ -9,9 +9,18 @@ from pathlib import Path
 
 from .buckets import bucket_for, upscale_factor
 from .captions import contains_token, normalize
+from .dedupe import DuplicateReport
 from .imagesize import read_size
 
 IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".webp", ".bmp", ".jfif", ".tif", ".tiff"})
+
+
+def list_images(root: Path | str) -> list[Path]:
+    """Every image file directly inside *root*, sorted by name."""
+    root = Path(root)
+    return sorted(
+        path for path in root.iterdir() if path.is_file() and path.suffix.lower() in IMAGE_EXTS
+    )
 
 
 @dataclass
@@ -70,9 +79,7 @@ def scan(
 
     dataset = Dataset(root=root, resolution=resolution)
 
-    paths = sorted(
-        path for path in root.iterdir() if path.is_file() and path.suffix.lower() in IMAGE_EXTS
-    )
+    paths = list_images(root)
 
     for path in paths:
         size = read_size(path)
@@ -110,6 +117,8 @@ def report(
     *,
     trigger: str | None = None,
     expected: tuple[int, int] | None = None,
+    duplicates: DuplicateReport | None = None,
+    min_side: int | None = None,
 ) -> tuple[str, list[Finding]]:
     """Render the audit as text plus a list of findings."""
     findings: list[Finding] = []
@@ -249,6 +258,40 @@ def report(
                     "note",
                     f"{dataset.count} images is above the {low}-{high} this preset expects; "
                     "training will be slower and the rank may need raising",
+                )
+            )
+
+    if min_side is not None:
+        undersized = [
+            entry for entry in dataset.entries if min(entry.width, entry.height) < min_side
+        ]
+        if undersized:
+            lines.append(f"under {min_side:<5} {len(undersized)}")
+            findings.append(
+                Finding(
+                    "warn",
+                    f"{len(undersized)} image(s) are under {min_side}px on the short side; "
+                    f"the dataset rule is at least {min_side}x{min_side}",
+                )
+            )
+
+    if duplicates is not None:
+        if duplicates.groups:
+            covered = sum(len(group.members) for group in duplicates.groups)
+            lines.append(f"duplicates  {len(duplicates.groups)} group(s), {covered} images")
+            findings.append(
+                Finding(
+                    "warn",
+                    f"{len(duplicates.groups)} duplicate group(s) covering {covered} images "
+                    f"({len(duplicates.exact)} exact, {len(duplicates.near)} near); duplicates "
+                    "weight the trigger towards whatever repeats",
+                )
+            )
+        elif not duplicates.perceptual:
+            findings.append(
+                Finding(
+                    "note",
+                    "near-duplicate detection unavailable without Pillow (pip install pillow)",
                 )
             )
 

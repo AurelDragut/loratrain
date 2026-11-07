@@ -3,16 +3,28 @@
 from __future__ import annotations
 
 import argparse
+import codecs
+import os
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import __version__
-from .dataset import Finding, report as build_report, scan
+from .captioning import (
+    DEFAULT_PROMPT,
+    CaptionRequest,
+    render_report as render_caption_report,
+    run as run_caption,
+)
+from .dataset import Finding, list_images, report as build_report, scan
+from .dedupe import find_duplicates
 from .env import SdScripts, which_accelerate
 from .presets import ALIASES, PRESETS, Preset, presets_text
-from .runner import build_command, run_command
+from .progress import Monitor, parse_line
+from .runner import SPLIT_RE, build_command, run_command
 from .tomlgen import build_parts, write_files
+from .vlm import VlmConfig, list_models, resolve_flavor
 
 
 @dataclass
@@ -62,11 +74,14 @@ def _parser() -> argparse.ArgumentParser:
     check.add_argument("dataset")
     check.add_argument("--preset", default="sdxl", choices=sorted(PRESETS))
     _add_scan_args(check)
+    check.add_argument("--no-duplicates", action="store_true", help="skip duplicate detection")
     check.add_argument("--strict", action="store_true", help="exit non-zero on warnings too")
     check.set_defaults(handler=_cmd_check)
 
     doctor = sub.add_parser("doctor", help="show what loratrain can see on this machine")
     _add_env_args(doctor)
+    doctor.add_argument("--vlm-url", default=None, help="also check a vision endpoint")
+    doctor.add_argument("--vlm-model", default=None, help="model the endpoint should be serving")
     doctor.set_defaults(handler=_cmd_doctor)
 
     plan = sub.add_parser("plan", help="audit a dataset, write the config, print the command")
@@ -78,7 +93,57 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--dry-run", action="store_true", help="print everything but do not train")
     run.add_argument("--force", action="store_true", help="train even if the audit found errors")
     run.add_argument("--log", default=None, help="training log path (default: <out>/train.log)")
+    run.add_argument(
+        "--report-every",
+        type=float,
+        default=60.0,
+        help="seconds between progress readings while training (0 disables)",
+    )
     run.set_defaults(handler=_cmd_run)
+
+    watch = sub.add_parser("watch", help="read a training log: speed, loss trend, eta")
+    watch.add_argument("path", help="train.log or the output folder holding it")
+    watch.add_argument("--follow", action="store_true", help="keep reading while training writes")
+    watch.add_argument("--from-start", action="store_true", help="with --follow, read existing lines too")
+    watch.add_argument("--every", type=float, default=30.0, help="seconds between readings when following")
+    watch.set_defaults(handler=_cmd_watch)
+
+    caption = sub.add_parser("caption", help="check duplicates and size, then caption with a vision model")
+    caption.add_argument("dataset")
+    caption.add_argument("--preset", default="sdxl", choices=sorted(PRESETS))
+    caption.add_argument("--trigger", default=None, help="trigger word to put first in every caption")
+    caption.add_argument("--vlm-url", default=None, help="OpenAI-compatible base URL, e.g. http://localhost:1234/v1")
+    caption.add_argument("--vlm-model", default=None, help="model name the endpoint expects")
+    caption.add_argument(
+        "--vlm-flavor", choices=["auto", "openai", "ollama"], default="auto",
+        help="auto treats a bare host as Ollama and anything with /v1 as OpenAI-compatible",
+    )
+    caption.add_argument("--vlm-timeout", type=float, default=None, help="seconds per request (default 300)")
+    caption.add_argument("--api-key-env", default="LORATRAIN_VLM_API_KEY")
+    caption.add_argument("--prompt", default=None, help="caption instruction sent to the model")
+    caption.add_argument("--prompt-file", default=None, help="file holding the caption instruction")
+    caption.add_argument(
+        "--style", choices=["sentence", "tags", "both"], default="sentence",
+        help="caption shape (sentence suits Flux, tags suit SDXL)",
+    )
+    caption.add_argument(
+        "--subject", choices=["character", "general"], default="character",
+        help="character checks attributes for consistency across the dataset",
+    )
+    caption.add_argument("--min-side", type=int, default=None, help="minimum short side (default: preset resolution)")
+    caption.add_argument("--workers", type=int, default=1, help="parallel model calls")
+    caption.add_argument(
+        "--duplicates", choices=["skip", "keep", "only"], default="skip",
+        help="skip duplicates, caption them anyway, or only report them",
+    )
+    caption.add_argument("--near-threshold", type=int, default=8, help="dHash distance for near-duplicates")
+    caption.add_argument("--overwrite", action="store_true", help="rewrite existing caption files")
+    caption.add_argument("--refresh", action="store_true", help="ignore the caption cache")
+    caption.add_argument("--write", action="store_true", help="write the captions to disk")
+    caption.add_argument("--limit", type=int, default=None, help="caption at most N images")
+    caption.add_argument("--cache", default=None, help="caption cache path")
+    caption.add_argument("--caption-ext", default=".txt")
+    caption.set_defaults(handler=_cmd_caption)
 
     return parser
 
@@ -147,7 +212,13 @@ def _cmd_check(args: argparse.Namespace) -> int:
         max_reso=preset.max_bucket_reso,
         caption_ext=args.caption_ext,
     )
-    text, findings = build_report(dataset, trigger=args.trigger, expected=preset.images)
+    text, findings = build_report(
+        dataset,
+        trigger=args.trigger,
+        expected=preset.images,
+        duplicates=None if args.no_duplicates else find_duplicates(list_images(args.dataset)),
+        min_side=preset.resolution,
+    )
     print(text)
 
     if findings:
@@ -193,7 +264,81 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     accelerate = which_accelerate()
     print(f"accelerate  {accelerate or 'NOT FOUND (pip install accelerate)'}")
 
-    return 0 if sd is not None and accelerate else 1
+    ok = sd is not None and bool(accelerate)
+
+    if args.vlm_url:
+        config = VlmConfig(base_url=args.vlm_url, model=args.vlm_model or "")
+        flavor = resolve_flavor(config)
+        models = list_models(config)
+        print(f"vlm         {args.vlm_url} ({flavor})")
+
+        if models is None:
+            print("            could not list models - is the server running?")
+            ok = False
+        else:
+            shown = ", ".join(models[:6])
+            if len(models) > 6:
+                shown += f", ... ({len(models)} total)"
+            print(f"            model(s): {shown}")
+            if args.vlm_model and args.vlm_model not in models:
+                print(f"            WARN {args.vlm_model} is not among them")
+                ok = False
+
+    return 0 if ok else 1
+
+
+def _cmd_caption(args: argparse.Namespace) -> int:
+    preset = PRESETS[args.preset]
+    dataset = Path(args.dataset).expanduser()
+    if not dataset.is_dir():
+        raise SystemExit(f"dataset folder not found: {dataset}")
+
+    prompt = DEFAULT_PROMPT
+    if args.prompt_file:
+        prompt = Path(args.prompt_file).expanduser().read_text(encoding="utf-8")
+    if args.prompt:
+        prompt = args.prompt
+
+    vlm = None
+    if args.vlm_url:
+        if not args.vlm_model:
+            raise SystemExit("--vlm-url needs --vlm-model")
+        api_key = os.environ.get(args.api_key_env) if args.api_key_env else None
+        vlm = VlmConfig(
+            base_url=args.vlm_url, model=args.vlm_model, api_key=api_key, flavor=args.vlm_flavor
+        )
+        if args.vlm_timeout is not None:
+            vlm.timeout = args.vlm_timeout
+
+    min_side = args.min_side if args.min_side is not None else preset.resolution
+
+    report = run_caption(
+        CaptionRequest(
+            dataset=dataset,
+            trigger=args.trigger or "",
+            min_side=min_side,
+            style=args.style,
+            subject=args.subject,
+            duplicates_mode=args.duplicates,
+            near_threshold=args.near_threshold,
+            workers=args.workers,
+            overwrite=args.overwrite,
+            refresh=args.refresh,
+            write=args.write,
+            limit=args.limit,
+            caption_ext=args.caption_ext,
+            prompt=prompt,
+            cache_path=Path(args.cache).expanduser() if args.cache else None,
+            vlm=vlm,
+        )
+    )
+    print(render_caption_report(report))
+
+    if vlm is None:
+        print()
+        print("no --vlm-url given: only duplicate and size checks ran")
+
+    return 1 if report.failed else 0
 
 
 def _cmd_plan(args: argparse.Namespace) -> int:
@@ -222,16 +367,111 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
     log_path = Path(args.log).expanduser() if args.log else plan.out_dir / "train.log"
 
+    monitor = Monitor()
+    last_report = [0.0]
+
+    def on_line(line: str) -> None:
+        sample = parse_line(line)
+        if sample is None:
+            return
+        monitor.add(sample)
+        if not args.report_every:
+            return
+        now = time.monotonic()
+        if now - last_report[0] >= args.report_every:
+            last_report[0] = now
+            print(f"  [watch] {monitor.status_line()}")
+            sys.stdout.flush()
+
     print()
     print("starting training - ctrl-c stops it, re-run to resume from the last saved state")
     try:
-        code = run_command(plan.command, cwd=plan.sd_root, log_path=log_path)
+        code = run_command(plan.command, cwd=plan.sd_root, log_path=log_path, on_line=on_line)
     except KeyboardInterrupt:
         print("\ninterrupted")
+        if monitor.samples:
+            print()
+            print(monitor.report())
         return 130
+
+    if monitor.samples:
+        print()
+        print(monitor.report())
 
     print(f"log: {log_path}")
     return code
+
+
+def _cmd_watch(args: argparse.Namespace) -> int:
+    log = _resolve_log(Path(args.path).expanduser())
+
+    if args.follow:
+        return _follow(log, every=max(1.0, args.every), from_start=args.from_start)
+
+    try:
+        text = log.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise SystemExit(f"cannot read {log}: {exc}")
+
+    monitor = Monitor()
+    for line in text.splitlines():
+        sample = parse_line(line)
+        if sample is not None:
+            monitor.add(sample)
+
+    print(f"log: {log}")
+    print(monitor.report())
+    return 0
+
+
+def _follow(log: Path, *, every: float, from_start: bool) -> int:
+    monitor = Monitor()
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    last = 0.0
+
+    print(f"following {log} (ctrl-c to stop)")
+    try:
+        with open(log, "rb") as handle:
+            if not from_start:
+                handle.seek(0, os.SEEK_END)
+
+            while True:
+                chunk = handle.read(8192)
+                if chunk:
+                    for part in SPLIT_RE.split(decoder.decode(chunk)):
+                        if part.strip():
+                            sample = parse_line(part)
+                            if sample is not None:
+                                monitor.add(sample)
+
+                now = time.monotonic()
+                if monitor.samples and now - last >= every:
+                    last = now
+                    print(monitor.status_line())
+                    sys.stdout.flush()
+
+                if not chunk:
+                    time.sleep(0.5)
+    except KeyboardInterrupt:
+        print()
+        print(monitor.report())
+        return 0
+
+
+def _resolve_log(path: Path) -> Path:
+    if path.is_dir():
+        candidate = path / "train.log"
+        if candidate.is_file():
+            return candidate
+        logs = sorted(path.glob("*.log"))
+        if logs:
+            return logs[-1]
+        raise SystemExit(f"no train.log in {path}; pass the log file directly")
+
+    if not path.is_file():
+        raise SystemExit(f"no such file: {path}")
+
+    return path
 
 
 def _prepare(args: argparse.Namespace, *, need_script: bool) -> Plan:
