@@ -56,5 +56,5 @@ def deviations(attributes: dict[str, str], dominant: dict[str, str]) -> dict[str
         if not value or key not in dominant:
             continue
         if value.lower() != dominant[key]:
-            deviations[key] = value
-    return deviations
+            result[key] = value
+    return result
