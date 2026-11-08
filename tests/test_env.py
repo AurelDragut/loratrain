@@ -34,6 +34,31 @@ def test_discover_uses_the_hint_first(tmp_path):
     assert found.root == (tmp_path / "kohya_ss" / "sd-scripts").resolve()
 
 
+def test_discover_looks_inside_mounted_volumes(tmp_path, monkeypatch):
+    mount = tmp_path / "Data"
+    inner = _scripts(mount / "sd-scripts")
+    monkeypatch.setattr("loratrain.env._mount_roots", lambda: [mount])
+
+    found = SdScripts.discover()
+
+    assert found is not None
+    assert found.root == inner.resolve()
+
+
+def test_python_prefers_the_venv_beside_the_scripts(tmp_path):
+    folder = _scripts(tmp_path / "sd-scripts")
+    bin_dir = folder / ".venv" / "bin"
+    bin_dir.mkdir(parents=True)
+    interpreter = bin_dir / "python"
+    interpreter.write_text("")
+
+    assert SdScripts(folder).python() == str(interpreter)
+
+
+def test_python_is_none_without_a_venv(tmp_path):
+    assert SdScripts(_scripts(tmp_path / "sd-scripts")).python() is None
+
+
 def test_which_accelerate_prefers_the_given_environment(tmp_path, monkeypatch):
     bin_dir = tmp_path / "venv" / "bin"
     bin_dir.mkdir(parents=True)

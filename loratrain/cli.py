@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import codecs
 import os
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
@@ -175,8 +176,8 @@ def _add_env_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--sd-scripts", default=None, help="path to the sd-scripts checkout")
     parser.add_argument(
         "--python",
-        default=sys.executable,
-        help="python used to probe sd-scripts flags (default: this interpreter)",
+        default=None,
+        help="python used to probe sd-scripts flags (default: the venv beside sd-scripts, else this interpreter)",
     )
 
 
@@ -260,10 +261,11 @@ def _cmd_check(args: argparse.Namespace) -> int:
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
-    print(f"loratrain {__version__}")
-    print(f"python      {sys.version.split()[0]}  ({args.python})")
-
     sd = SdScripts.discover(args.sd_scripts)
+    python = _resolve_python(args, sd)
+
+    print(f"loratrain {__version__}")
+    print(f"python      {_python_version(python)}  ({python})")
     if sd is None:
         print("sd-scripts  NOT FOUND")
         print("            pass --sd-scripts /path/to/sd-scripts or set LORATRAIN_SD_SCRIPTS")
@@ -272,7 +274,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         for name in ("sdxl_train_network.py", "flux_train_network.py"):
             print(f"  {name:<24} {'found' if sd.script(name) else 'MISSING'}")
 
-        probe = sd.probe("flux_train_network.py", args.python)
+        probe = sd.probe("flux_train_network.py", python)
         if probe is None:
             print("  flag probe unavailable (running --help failed)")
         else:
@@ -284,10 +286,10 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             print(f"  t5 token length flag: --{token_name}" if token_name else "  t5 token length flag: not found")
             print(f"  flux_shift timestep sampling: {'yes' if probe.mentions('flux_shift') else 'no'}")
 
-    accelerate = which_accelerate(args.python)
+    accelerate = which_accelerate(python)
     print(f"accelerate  {accelerate or 'NOT FOUND'}")
     if accelerate is None:
-        print(f"            try {args.python} -m pip install accelerate")
+        print(f"            try {python} -m pip install accelerate")
 
     ok = sd is not None and bool(accelerate)
 
@@ -619,10 +621,11 @@ def _prepare(args: argparse.Namespace, *, need_script: bool) -> Plan:
 
     sd = SdScripts.discover(args.sd_scripts)
     script = sd.script(preset.script) if sd is not None else None
+    python = _resolve_python(args, sd)
 
     dropped: list[str] = []
     if sd is not None and not getattr(args, "no_filter", False):
-        probe = sd.probe(preset.script, args.python)
+        probe = sd.probe(preset.script, python)
         if probe is not None:
             top, dropped = _filter(top, probe.flags)
 
@@ -645,14 +648,14 @@ def _prepare(args: argparse.Namespace, *, need_script: bool) -> Plan:
         trigger=args.trigger,
     )
 
-    accelerate = which_accelerate(args.python)
+    accelerate = which_accelerate(python)
     command = None
     if script is not None and accelerate is not None:
         command = build_command(accelerate, script, config)
     elif need_script:
         raise SystemExit(
-            f"accelerate not found next to {args.python} or on PATH; "
-            f"try {args.python} -m pip install accelerate"
+            f"accelerate not found next to {python} or on PATH; "
+            f"try {python} -m pip install accelerate"
         )
 
     return Plan(
@@ -744,6 +747,41 @@ def _filter(top: dict, supported: set[str]) -> tuple[dict, list[str]]:
         dropped.append(key)
 
     return kept, dropped
+
+
+def _resolve_python(args: argparse.Namespace, sd: SdScripts | None = None) -> str:
+    """The interpreter to probe and launch with: explicit, then sd-scripts' own venv.
+
+    ``--python`` is only needed when the two live apart; normally the venv holding
+    torch and accelerate sits beside the checkout, so it is the right default.
+    """
+    if getattr(args, "python", None):
+        return args.python
+
+    if sd is None:
+        sd = SdScripts.discover(getattr(args, "sd_scripts", None))
+
+    if sd is not None:
+        interpreter = sd.python()
+        if interpreter:
+            return interpreter
+
+    return sys.executable
+
+
+def _python_version(python: str) -> str:
+    if os.path.realpath(python) == os.path.realpath(sys.executable):
+        return sys.version.split()[0]
+    try:
+        proc = subprocess.run(
+            [python, "-c", "import sys;print(sys.version.split()[0])"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "?"
+    return (proc.stdout or "").strip() or "?"
 
 
 def _parse_overrides(pairs: list[str]) -> dict:

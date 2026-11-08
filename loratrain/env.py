@@ -65,6 +65,11 @@ class SdScripts:
             ]
         )
 
+        # A second drive is a normal place to keep a 20 GB checkout, and it is not
+        # any of the paths above: /run/media/<user>/<label> or /media/<user>/<label>.
+        for mount in _mount_roots():
+            candidates.extend([mount, mount / "sd-scripts", mount / "kohya_ss", mount / "kohya-ss"])
+
         for candidate in candidates:
             found = cls._resolve(candidate)
             if found is not None:
@@ -87,6 +92,24 @@ class SdScripts:
                 continue
             if any((folder / name).is_file() for name in KNOWN_SCRIPTS):
                 return folder
+        return None
+
+    def python(self) -> str | None:
+        """The interpreter that can run these scripts: a venv beside or above them.
+
+        sd-scripts needs torch and accelerate, and on a working install they sit in
+        a venv next to the checkout (``sd-scripts/.venv``) or beside it
+        (``kohya_ss/.venv``). Using it by default is what makes ``--python``
+        unnecessary in the normal case.
+        """
+        for folder in (self.root / ".venv", self.root.parent / ".venv", self.root / "venv", self.root.parent / "venv"):
+            for name in ("bin/python", "bin/python3", "Scripts/python.exe"):
+                path = folder / name
+                try:
+                    if path.is_file():
+                        return str(path)
+                except OSError:
+                    continue
         return None
 
     def script(self, name: str) -> Path | None:
@@ -116,6 +139,24 @@ class SdScripts:
         if not flags:
             return None
         return Probe(flags=flags, text=text)
+
+
+def _mount_roots() -> list[Path]:
+    """The volumes mounted for this user, one level deep, in a stable order."""
+    user = Path.home().name
+    roots: list[Path] = []
+    for parent in (Path("/run/media") / user, Path("/media") / user):
+        try:
+            entries = sorted(parent.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                if entry.is_dir():
+                    roots.append(entry)
+            except OSError:
+                continue
+    return roots
 
 
 def which_accelerate(python: str | None = None) -> str | None:
