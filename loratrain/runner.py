@@ -15,12 +15,18 @@ SPLIT_RE = re.compile(r"[\r\n]+")
 def build_command(
     accelerate: str,
     script: Path,
-    config: Path,
+    config: Path | None = None,
     *,
+    extra_args: list[str] | None = None,
     num_cpu_threads: int = 1,
     mixed_precision: str = "bf16",
 ) -> list[str]:
-    return [
+    """The accelerate launch line.
+
+    sd-scripts takes one config file; musubi takes flags instead, so ``config`` is
+    optional and ``extra_args`` carries the argv in that case.
+    """
+    command = [
         accelerate,
         "launch",
         "--num_cpu_threads_per_process",
@@ -28,9 +34,12 @@ def build_command(
         "--mixed_precision",
         mixed_precision,
         str(script),
-        "--config_file",
-        str(config),
     ]
+    if config is not None:
+        command += ["--config_file", str(config)]
+    else:
+        command += list(extra_args or [])
+    return command
 
 
 def run_command(

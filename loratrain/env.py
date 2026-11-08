@@ -20,7 +20,16 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-KNOWN_SCRIPTS = ("sdxl_train_network.py", "flux_train_network.py", "train_network.py")
+KNOWN_SCRIPTS = (
+    "sdxl_train_network.py",
+    "flux_train_network.py",
+    "train_network.py",
+    # musubi-tuner keeps these at the repository root, next to sd-scripts' own.
+    "krea2_train_network.py",
+    "flux_2_train_network.py",
+    "zimage_train_network.py",
+    "minimax_h3_train_network.py",
+)
 FLAG_RE = re.compile(r"--([a-zA-Z0-9_]+)")
 
 
@@ -38,8 +47,13 @@ class SdScripts:
         self.root = Path(root).expanduser().resolve()
 
     @classmethod
-    def discover(cls, hint: str | None = None) -> "SdScripts | None":
-        """Find the folder holding the training scripts, or None."""
+    def discover(cls, hint: str | None = None, script: str | None = None) -> "SdScripts | None":
+        """Find the folder holding the training scripts, or None.
+
+        With *script*, a folder that holds that particular script wins over one
+        that only holds some other engine's: sd-scripts and musubi-tuner commonly
+        sit side by side, and only one of them has ``krea2_train_network.py``.
+        """
         candidates: list[Path] = []
 
         if hint:
@@ -57,10 +71,12 @@ class SdScripts:
                 home / "sd-scripts",
                 home / "kohya_ss",
                 home / "kohya-ss",
+                home / "musubi-tuner",
                 # Linux installs often live outside $HOME; these are the usual spots.
                 Path("/opt/kohya_ss"),
                 Path("/opt/kohya-ss"),
                 Path("/opt/sd-scripts"),
+                Path("/opt/musubi-tuner"),
                 Path("/usr/local/sd-scripts"),
             ]
         )
@@ -68,14 +84,27 @@ class SdScripts:
         # A second drive is a normal place to keep a 20 GB checkout, and it is not
         # any of the paths above: /run/media/<user>/<label> or /media/<user>/<label>.
         for mount in _mount_roots():
-            candidates.extend([mount, mount / "sd-scripts", mount / "kohya_ss", mount / "kohya-ss"])
+            candidates.extend(
+                [
+                    mount,
+                    mount / "sd-scripts",
+                    mount / "kohya_ss",
+                    mount / "kohya-ss",
+                    mount / "musubi-tuner",
+                ]
+            )
 
+        fallback: Path | None = None
         for candidate in candidates:
             found = cls._resolve(candidate)
-            if found is not None:
+            if found is None:
+                continue
+            if script is None or (found / script).is_file():
                 return cls(found)
+            if fallback is None:
+                fallback = found
 
-        return None
+        return cls(fallback) if fallback is not None else None
 
     @staticmethod
     def _resolve(candidate: Path) -> Path | None:

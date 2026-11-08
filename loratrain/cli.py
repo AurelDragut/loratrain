@@ -25,6 +25,8 @@ from .env import SdScripts, which_accelerate
 from .presets import ALIASES, PRESETS, Preset, presets_text
 from .progress import Monitor, parse_line
 from .runner import SPLIT_RE, build_command, run_command
+from .musubigen import build_dataset, build_flags, flags_to_args
+from .musubigen import write_files as write_musubi_files
 from .serve import build_server, run_server, start_in_thread
 from .tomlgen import build_parts, write_files
 from .vlm import VlmConfig, list_models, resolve_flavor
@@ -191,6 +193,10 @@ def _add_training_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--clip-l", dest="clip_l", default=None, help="Flux clip_l weights")
     parser.add_argument("--t5xxl", default=None, help="Flux t5xxl weights")
     parser.add_argument("--ae", default=None, help="Flux autoencoder weights")
+    parser.add_argument("--dit", default=None, help="musubi: transformer weights (Krea 2, FLUX.2, ...)")
+    parser.add_argument(
+        "--text-encoder", dest="text_encoder", default=None, help="musubi: text encoder weights"
+    )
     parser.add_argument(
         "--comfy",
         default=None,
@@ -555,6 +561,8 @@ def _prepare(args: argparse.Namespace, *, need_script: bool) -> Plan:
         "clip_l": args.clip_l,
         "t5xxl": args.t5xxl,
         "ae": args.ae,
+        "dit": args.dit,
+        "text_encoder": args.text_encoder,
     }
 
     comfy_choice: dict[str, str] = {}
@@ -596,62 +604,98 @@ def _prepare(args: argparse.Namespace, *, need_script: bool) -> Plan:
         dataset_scan, trigger=args.trigger, expected=preset.images
     )
 
-    top, general, dataset_section, subsets = build_parts(
-        preset,
-        dataset_dir=dataset.resolve(),
-        out_dir=out_dir,
-        name=name,
-        models={
-            key: (str(Path(value).expanduser()) if value else None)
-            for key, value in models.items()
-        },
-        repeats=repeats,
-        trigger=args.trigger,
-        resolution=resolution,
-        min_bucket=min_bucket,
-        max_bucket=max_bucket,
-        dim=args.dim,
-        alpha=args.alpha,
-        lr=args.lr,
-        units=units,
-        seed=args.seed,
-        caption_ext=args.caption_ext,
-        overrides=_parse_overrides(args.set),
-    )
+    overrides = _parse_overrides(args.set)
+    resolved_models = {
+        key: (str(Path(value).expanduser()) if value else None) for key, value in models.items()
+    }
 
-    sd = SdScripts.discover(args.sd_scripts)
+    sd = SdScripts.discover(args.sd_scripts, preset.script)
     script = sd.script(preset.script) if sd is not None else None
     python = _resolve_python(args, sd)
 
     dropped: list[str] = []
+    probe = None
     if sd is not None and not getattr(args, "no_filter", False):
         probe = sd.probe(preset.script, python)
+
+    if preset.engine == "musubi":
+        general, datasets = build_dataset(
+            preset,
+            dataset_dir=dataset.resolve(),
+            out_dir=out_dir,
+            repeats=repeats,
+            resolution=resolution,
+            caption_ext=args.caption_ext,
+        )
+        config, samples = write_musubi_files(
+            preset, general, datasets, out_dir=out_dir, trigger=args.trigger
+        )
+        flags = build_flags(
+            preset,
+            out_dir=out_dir,
+            name=name,
+            models=resolved_models,
+            units=units,
+            seed=args.seed,
+            dim=args.dim,
+            alpha=args.alpha,
+            lr=args.lr,
+            dataset_config=config,
+            sample_prompts=samples,
+            overrides=overrides,
+        )
+        if probe is not None:
+            flags, dropped = _filter(flags, probe.flags)
+        extra_args: list[str] | None = flags_to_args(flags)
+    else:
+        top, general, dataset_section, subsets = build_parts(
+            preset,
+            dataset_dir=dataset.resolve(),
+            out_dir=out_dir,
+            name=name,
+            models=resolved_models,
+            repeats=repeats,
+            trigger=args.trigger,
+            resolution=resolution,
+            min_bucket=min_bucket,
+            max_bucket=max_bucket,
+            dim=args.dim,
+            alpha=args.alpha,
+            lr=args.lr,
+            units=units,
+            seed=args.seed,
+            caption_ext=args.caption_ext,
+            overrides=overrides,
+        )
         if probe is not None:
             top, dropped = _filter(top, probe.flags)
+        config, samples = write_files(
+            preset,
+            top,
+            general,
+            dataset_section,
+            subsets,
+            out_dir=out_dir,
+            trigger=args.trigger,
+        )
+        extra_args = None
 
     if need_script:
         if sd is None:
             raise SystemExit(
-                "sd-scripts not found: pass --sd-scripts /path/to/sd-scripts, "
-                "or set LORATRAIN_SD_SCRIPTS"
+                "training scripts not found: pass --sd-scripts /path/to/sd-scripts or a "
+                "musubi-tuner checkout, or set LORATRAIN_SD_SCRIPTS"
             )
         if script is None:
             raise SystemExit(f"{preset.script} not found in {sd.root}")
 
-    config, samples = write_files(
-        preset,
-        top,
-        general,
-        dataset_section,
-        subsets,
-        out_dir=out_dir,
-        trigger=args.trigger,
-    )
-
     accelerate = which_accelerate(python)
     command = None
     if script is not None and accelerate is not None:
-        command = build_command(accelerate, script, config)
+        if preset.engine == "musubi":
+            command = build_command(accelerate, script, extra_args=extra_args)
+        else:
+            command = build_command(accelerate, script, config)
     elif need_script:
         raise SystemExit(
             f"accelerate not found next to {python} or on PATH; "

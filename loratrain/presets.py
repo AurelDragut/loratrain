@@ -36,6 +36,8 @@ class Preset:
     supports_vae: bool
     notes: str
     extra: dict = field(default_factory=dict, compare=False)
+    # "sd-scripts" writes one TOML config; "musubi" writes a dataset TOML and argv.
+    engine: str = "sd-scripts"
 
     @property
     def unit_flag(self) -> str:
@@ -161,6 +163,43 @@ PRESETS: dict[str, Preset] = {
                 "cache_text_encoder_outputs": True,
                 "cache_text_encoder_outputs_to_disk": True,
             },
+        ),
+        Preset(
+            name="krea2",
+            title="Krea 2 (musubi-tuner) - character LoRA",
+            script="krea2_train_network.py",
+            unit_kind="epochs",
+            units=9,
+            save_every=1,
+            resolution=1024,
+            min_bucket_reso=1024,
+            max_bucket_reso=1536,
+            network_module="networks.lora_krea2",
+            network_dim=32,
+            network_alpha=32,
+            lr=1e-4,
+            text_encoder_lr=None,
+            lr_scheduler="cosine",
+            lr_warmup_steps=63,
+            max_grad_norm=1.0,
+            default_repeats=1,
+            images=(30, 60),
+            requires=("dit", "vae", "text_encoder"),
+            sampling=True,
+            supports_vae=False,
+            notes=(
+                "musubi-tuner, not sd-scripts: convrot_int8 is the fast path on a "
+                "3090 (fp8 dequantises every forward), blocks_to_swap 12 fits 24 GB, "
+                "and the latents have to be cached before the first step"
+            ),
+            extra={
+                "convrot_int8": True,
+                "blocks_to_swap": 12,
+                "timestep_sampling": "krea2_shift",
+                "weighting_scheme": "none",
+                "save_state": True,
+            },
+            engine="musubi",
         ),
     )
 }
