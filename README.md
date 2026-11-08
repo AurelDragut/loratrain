@@ -4,14 +4,12 @@ A small command line front end for kohya's `sd-scripts` that does the three thin
 the training scripts leave to you: check the dataset, build a config that matches
 the model you are actually training, and launch it.
 
-Three presets ship, each encoding one specific failure mode:
+Presets ship, each encoding one specific failure mode:
 
 - `sdxl` — eyes come out wrong because the dataset was trained at 512, faces are
   small in frame, or the text encoders ran in fp16.
 - `flux` - anatomy renders wrong or not at all because it occupies too few pixels
   in the dataset and the captions never name it.
-- `krea` - the face looks untrained because a LoRA trained on `flux1-dev` was
-  applied to Krea, whose weights are different enough to dilute the delta.
 
 ## Install
 
@@ -49,7 +47,6 @@ from `<root>/models`, choosing the file that can actually train:
 
 ```
 loratrain run ~/data/sdxl --preset sdxl --comfy ~/ComfyUI --trigger mytok
-loratrain run ~/data/krea --preset krea --comfy ~/ComfyUI --trigger mytok
 ```
 
 Explicit `--base` / `--clip-l` / `--t5xxl` / `--ae` always win over what it finds.
@@ -140,14 +137,25 @@ loratrain watch   <out> --follow
 loratrain serve   <out>
 ```
 
-Flux and Krea need four model files:
+Flux needs four model files:
 
 ```
-loratrain run ~/data/krea --preset krea \
-  --base ~/models/flux1-krea-dev.safetensors \
+loratrain run ~/data/set --preset flux \
+  --base ~/models/flux1-dev.safetensors \
   --clip-l ~/models/clip_l.safetensors \
   --t5xxl ~/models/t5xxl_fp16.safetensors \
   --ae ~/models/ae.safetensors \
+  --trigger mytok
+```
+
+Musubi presets (`krea2`, `h3`, `ltx2`) take `--dit`, `--vae` and `--text-encoder`
+instead, and write a dataset TOML rather than a training config:
+
+```
+loratrain run ~/data/set --preset krea2 \
+  --dit ~/models/krea2Raw_v10_bf16.safetensors \
+  --vae ~/models/qwen_image_vae.safetensors \
+  --text-encoder ~/models/qwen3vl_4b_bf16.safetensors \
   --trigger mytok
 ```
 

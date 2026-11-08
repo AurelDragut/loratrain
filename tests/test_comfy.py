@@ -120,7 +120,7 @@ def test_fp8_base_is_not_trainable(tmp_path):
 def test_select_prefers_bf16_t5_and_the_flux_transformer(tmp_path):
     root = _models_tree(tmp_path)
 
-    chosen = select(scan(root), "krea")
+    chosen = select(scan(root), "flux")
 
     assert chosen["base"].name == "flux1-dev.safetensors"
     assert chosen["t5xxl"].name == "t5xxl_fp16.safetensors"

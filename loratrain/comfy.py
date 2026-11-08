@@ -223,7 +223,7 @@ def select(models: list[ModelFile], preset_name: str) -> dict[str, Path]:
     """Map a preset's required flags to the best usable files found."""
     chosen: dict[str, str | Path] = {}
 
-    wanted_kind = "flux" if preset_name in ("flux", "krea") else "sdxl"
+    wanted_kind = "flux" if preset_name == "flux" else "sdxl"
     bases = [
         model for model in models if model.role == "base" and model.usable and model.kind == wanted_kind
     ]
