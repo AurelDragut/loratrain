@@ -14,6 +14,9 @@ from pathlib import Path
 from .presets import Preset
 from .tomlgen import _fmt, _sample_prompts
 
+# What a model path is called on the command line, unless the preset says otherwise.
+DEFAULT_MODEL_FLAGS = {"dit": "dit", "vae": "vae", "text_encoder": "text_encoder"}
+
 
 def _value(value) -> str:
     """Format one TOML value, including the arrays musubi wants for resolution."""
@@ -110,7 +113,7 @@ def build_flags(
     for key in ("dit", "vae", "text_encoder"):
         value = models.get(key)
         if value:
-            flags[key] = value
+            flags[preset.model_flags.get(key, DEFAULT_MODEL_FLAGS[key])] = value
 
     if dataset_config is not None:
         flags["dataset_config"] = str(dataset_config)

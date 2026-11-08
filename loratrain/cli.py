@@ -758,7 +758,11 @@ def _print_plan(plan: Plan) -> None:
         print("  " + " ".join(plan.command))
         print(f"cwd        {plan.sd_root}  (networks.* modules resolve from here)")
     else:
-        print("command    unavailable: sd-scripts or accelerate not found")
+        missing_script = plan.sd_root is not None and not (plan.sd_root / plan.preset.script).is_file()
+        if missing_script:
+            print(f"command    unavailable: {plan.preset.script} not found in {plan.sd_root}")
+        else:
+            print("command    unavailable: sd-scripts or accelerate not found")
 
 
 def _units(args: argparse.Namespace, preset: Preset) -> int:

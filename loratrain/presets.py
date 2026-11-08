@@ -38,6 +38,8 @@ class Preset:
     extra: dict = field(default_factory=dict, compare=False)
     # "sd-scripts" writes one TOML config; "musubi" writes a dataset TOML and argv.
     engine: str = "sd-scripts"
+    # musubi flags are not uniform: LTX-2 calls the DiT --ltx2_checkpoint.
+    model_flags: dict = field(default_factory=dict, compare=False)
 
     @property
     def unit_flag(self) -> str:
@@ -199,6 +201,86 @@ PRESETS: dict[str, Preset] = {
                 "weighting_scheme": "none",
                 "save_state": True,
             },
+            engine="musubi",
+        ),
+        Preset(
+            name="h3",
+            title="MiniMax H3 (musubi-tuner) - character LoRA, teacher matching",
+            script="minimax_h3_train_network.py",
+            unit_kind="steps",
+            units=500,
+            save_every=250,
+            resolution=1024,
+            min_bucket_reso=1024,
+            max_bucket_reso=1536,
+            network_module="networks.lora_minimax_h3",
+            network_dim=32,
+            network_alpha=32,
+            lr=3e-4,
+            text_encoder_lr=None,
+            lr_scheduler="cosine",
+            lr_warmup_steps=50,
+            max_grad_norm=1.0,
+            default_repeats=1,
+            images=(30, 60),
+            requires=("dit",),
+            sampling=False,
+            supports_vae=False,
+            notes=(
+                "video model trained one frame at a time: both VAEs and the Qwen3-VL "
+                "outputs must be cached first, the pretrained int8 DiT needs "
+                "--block_swap_h2d_only, and the teacher-matching loss is what makes "
+                "the identity hold instead of drifting"
+            ),
+            extra={
+                "task": "t2va",
+                "one_frame": True,
+                "video_only": True,
+                "blocks_to_swap": 48,
+                "block_swap_h2d_only": True,
+                "h3_teacher_matching": True,
+                "h3_teacher_conditions": "subject_ref",
+                "h3_teacher_condition_sigma_min": 0.15,
+                "h3_teacher_loss_mag_weight": 0.5,
+                "h3_teacher_loss_dc_weight": 0.3,
+            },
+            engine="musubi",
+        ),
+        Preset(
+            name="ltx2",
+            title="LTX-2 / 2.3 (musubi-tuner ltx-2 fork) - video LoRA",
+            script="ltx2_train_network.py",
+            unit_kind="steps",
+            units=1000,
+            save_every=250,
+            resolution=1024,
+            min_bucket_reso=768,
+            max_bucket_reso=1280,
+            network_module="networks.lora_ltx2",
+            network_dim=32,
+            network_alpha=16,
+            lr=1e-4,
+            text_encoder_lr=None,
+            lr_scheduler="cosine",
+            lr_warmup_steps=50,
+            max_grad_norm=1.0,
+            default_repeats=1,
+            images=(20, 60),
+            requires=("dit", "text_encoder"),
+            sampling=False,
+            supports_vae=False,
+            notes=(
+                "LTX-2 is not in upstream musubi-tuner: this needs the ltx-2 fork "
+                "(AkaneTendo25/musubi-tuner, branch ltx-2), which ships ltx2_train_network.py "
+                "and networks.lora_ltx2; nf4_base is the 3090 fit, the checkpoint is passed "
+                "as --ltx2_checkpoint and Gemma as --gemma_root"
+            ),
+            extra={
+                "ltx2_mode": "video",
+                "blocks_to_swap": 32,
+                "nf4_base": True,
+            },
+            model_flags={"dit": "ltx2_checkpoint", "text_encoder": "gemma_root"},
             engine="musubi",
         ),
     )

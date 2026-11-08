@@ -73,6 +73,23 @@ def test_sampling_needs_a_trigger():
     assert with_samples[with_samples.index("--sample_prompts") + 1] == "/out/sample_prompts.txt"
 
 
+def test_ltx2_renames_the_model_flags_it_expects():
+    preset = PRESETS["ltx2"]
+
+    args = flags_to_args(
+        build_flags(
+            preset,
+            out_dir="/out",
+            name="tok",
+            models={"dit": "/m/ltx2.safetensors", "text_encoder": "/m/gemma"},
+        )
+    )
+
+    assert args[:4] == ["--ltx2_checkpoint", "/m/ltx2.safetensors", "--gemma_root", "/m/gemma"]
+    assert preset.script == "ltx2_train_network.py"
+    assert "--nf4_base" in args
+
+
 def test_krea2_is_a_musubi_preset():
     preset = PRESETS["krea2"]
 
